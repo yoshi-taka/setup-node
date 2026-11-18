@@ -96318,6 +96318,8 @@ var State;
     State["CachePrimaryKey"] = "CACHE_KEY";
     State["CacheMatchedKey"] = "CACHE_RESULT";
     State["CachePaths"] = "CACHE_PATHS";
+    State["CacheVerificationLogPath"] = "CACHE_VERIFICATION_LOG_PATH";
+    State["CacheVerificationLogKey"] = "CACHE_VERIFICATION_LOG_KEY";
 })(State || (State = {}));
 var Outputs;
 (function (Outputs) {
@@ -97618,6 +97620,33 @@ const unique = () => {
 
 
 
+/**
+ * pnpm v11 and newer verify every lockfile entry before installing it — that
+ * each entry pins an integrity hash, that a pinned tarball URL matches the
+ * registry's own metadata and, where configured, the repository's supply-chain
+ * policies (minimumReleaseAge, trustPolicy, ...) — and memoize the verdict in
+ * `<cacheDir>/lockfile-verified.jsonl`. A job that starts without that log
+ * re-runs the whole registry-backed check, which on a large repository can
+ * cost more than the install itself. The store cache does not carry the log,
+ * because pnpm keeps it with its other caches, not with the packages.
+ *
+ * pnpm 12 and newer print their cache directory through `pnpm cache path`;
+ * on older versions the command fails and the log simply stays out of the
+ * cache, leaving this action's behavior unchanged.
+ */
+const getPnpmVerificationLogPath = async () => {
+    const { exitCode, stdout } = await getExecOutput('pnpm cache path', undefined, { silent: true, ignoreReturnCode: true });
+    if (exitCode !== 0) {
+        core_debug(`'pnpm cache path' failed with exit code ${exitCode}; not caching the pnpm lockfile verification log`);
+        return undefined;
+    }
+    const cacheDir = stdout.trim();
+    if (!cacheDir) {
+        core_debug("'pnpm cache path' printed no path; not caching the pnpm lockfile verification log");
+        return undefined;
+    }
+    return external_path_default().join(cacheDir, 'lockfile-verified.jsonl');
+};
 const supportedPackageManagers = {
     npm: {
         name: 'npm',
@@ -97627,7 +97656,8 @@ const supportedPackageManagers = {
     pnpm: {
         name: 'pnpm',
         lockFilePatterns: ['pnpm-lock.yaml'],
-        getCacheFolderPath: () => getCommandOutputNotEmpty('pnpm store path --silent', 'Could not get pnpm cache folder path')
+        getCacheFolderPath: () => getCommandOutputNotEmpty('pnpm store path --silent', 'Could not get pnpm cache folder path'),
+        getVerificationLogPath: getPnpmVerificationLogPath
     },
     yarn: {
         name: 'yarn',
@@ -97864,12 +97894,47 @@ const cache_restore_restoreCache = async (packageManager, cacheDependencyPath) =
     setOutput('cache-hit', Boolean(cacheKey));
     setOutput('cache-matched-key', cacheKey);
     core_debug(`cache-matched-key is ${cacheKey}`);
+    await restoreVerificationLog(packageManagerInfo, keyPrefix, fileHash);
     if (!cacheKey) {
         core_info(`${packageManager} cache is not found`);
         return;
     }
     saveState(State.CacheMatchedKey, cacheKey);
     core_info(`Cache restored from key: ${cacheKey}`);
+};
+/**
+ * pnpm keeps its lockfile verification verdict beside its other caches, not in
+ * the store, so the store cache does not carry it. Restore it under its own
+ * key: the verdict is only valid for the exact lockfile it was recorded for,
+ * so an entry for a different lockfile could never be reused. Restoring the
+ * log lets the workflow's upcoming `pnpm install` skip the registry-backed
+ * verification round trip; a miss costs exactly what jobs pay today.
+ */
+const restoreVerificationLog = async (packageManagerInfo, keyPrefix, fileHash) => {
+    if (!packageManagerInfo.getVerificationLogPath) {
+        return;
+    }
+    const logPath = await packageManagerInfo.getVerificationLogPath();
+    if (!logPath) {
+        return;
+    }
+    const logKey = `${keyPrefix}-verification-${fileHash}`;
+    saveState(State.CacheVerificationLogPath, logPath);
+    saveState(State.CacheVerificationLogKey, logKey);
+    try {
+        const matchedKey = await restoreCache([logPath], logKey);
+        if (matchedKey) {
+            core_info(`pnpm lockfile verification cache restored from key: ${matchedKey}`);
+        }
+        else {
+            core_debug('pnpm lockfile verification cache is not found');
+        }
+    }
+    catch (error) {
+        // The verification log only saves time, never correctness: a job that
+        // cannot restore it re-verifies the lockfile and moves on.
+        warning(`Failed to restore the pnpm lockfile verification cache: ${error.message}`);
+    }
 };
 const findLockFile = (packageManager) => {
     const lockFiles = packageManager.lockFilePatterns;

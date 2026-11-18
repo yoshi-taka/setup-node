@@ -1,8 +1,9 @@
 import * as core from '@actions/core';
 import * as cache from '@actions/cache';
+import fs from 'fs';
 
 import {State} from './constants.js';
-import {getPackageManagerInfo} from './cache-utils.js';
+import {getPackageManagerInfo, PackageManagerInfo} from './cache-utils.js';
 
 // Catch and log any unhandled exceptions.  These exceptions can leak out of the uploadChunk method in
 // @actions/toolkit when a failed upload closes the file descriptor causing any in-process reads to
@@ -54,6 +55,8 @@ const cachePackages = async (packageManager: string) => {
     );
   }
 
+  await saveVerificationLog(packageManagerInfo);
+
   if (primaryKey === state) {
     core.info(
       `Cache hit occurred on the primary key ${primaryKey}, not saving cache.`
@@ -71,6 +74,50 @@ const cachePackages = async (packageManager: string) => {
   }
 
   core.info(`Cache saved with the key: ${primaryKey}`);
+};
+
+/**
+ * pnpm's lockfile verification log lets the next job skip a registry-backed
+ * verification round trip, so it is saved from every job — including one whose
+ * store already hit its primary key, which returns before the store save.
+ * The path and key were resolved by the main step and handed over through
+ * the action state, so the post step needs no pnpm invocation of its own.
+ */
+const saveVerificationLog = async (packageManagerInfo: PackageManagerInfo) => {
+  if (!packageManagerInfo.getVerificationLogPath) {
+    return;
+  }
+  const logPath = core.getState(State.CacheVerificationLogPath);
+  const logKey = core.getState(State.CacheVerificationLogKey);
+  if (!logPath || !logKey) {
+    // The main step resolved no verification log (older pnpm, or a restore
+    // step that did not run), so there is nothing to save.
+    core.debug('No pnpm lockfile verification log to cache');
+    return;
+  }
+  if (!fs.existsSync(logPath)) {
+    core.debug(
+      `No pnpm lockfile verification log at ${logPath}; nothing to cache`
+    );
+    return;
+  }
+
+  try {
+    const cacheId = await cache.saveCache([logPath], logKey);
+    if (cacheId === -1) {
+      core.debug(
+        `pnpm lockfile verification cache was not saved for the key: ${logKey}`
+      );
+      return;
+    }
+    core.info(`pnpm lockfile verification cache saved with the key: ${logKey}`);
+  } catch (error) {
+    // A failed save costs the next job only the re-verification; never fail
+    // the post step over it.
+    core.warning(
+      `Failed to save the pnpm lockfile verification cache: ${(error as Error).message}`
+    );
+  }
 };
 
 run(true);

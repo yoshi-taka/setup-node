@@ -65,6 +65,8 @@ export const restoreCache = async (
   core.setOutput('cache-matched-key', cacheKey);
   core.debug(`cache-matched-key is ${cacheKey}`);
 
+  await restoreVerificationLog(packageManagerInfo, keyPrefix, fileHash);
+
   if (!cacheKey) {
     core.info(`${packageManager} cache is not found`);
     return;
@@ -72,6 +74,49 @@ export const restoreCache = async (
 
   core.saveState(State.CacheMatchedKey, cacheKey);
   core.info(`Cache restored from key: ${cacheKey}`);
+};
+
+/**
+ * pnpm keeps its lockfile verification verdict beside its other caches, not in
+ * the store, so the store cache does not carry it. Restore it under its own
+ * key: the verdict is only valid for the exact lockfile it was recorded for,
+ * so an entry for a different lockfile could never be reused. Restoring the
+ * log lets the workflow's upcoming `pnpm install` skip the registry-backed
+ * verification round trip; a miss costs exactly what jobs pay today.
+ */
+const restoreVerificationLog = async (
+  packageManagerInfo: PackageManagerInfo,
+  keyPrefix: string,
+  fileHash: string
+) => {
+  if (!packageManagerInfo.getVerificationLogPath) {
+    return;
+  }
+  const logPath = await packageManagerInfo.getVerificationLogPath();
+  if (!logPath) {
+    return;
+  }
+
+  const logKey = `${keyPrefix}-verification-${fileHash}`;
+  core.saveState(State.CacheVerificationLogPath, logPath);
+  core.saveState(State.CacheVerificationLogKey, logKey);
+
+  try {
+    const matchedKey = await cache.restoreCache([logPath], logKey);
+    if (matchedKey) {
+      core.info(
+        `pnpm lockfile verification cache restored from key: ${matchedKey}`
+      );
+    } else {
+      core.debug('pnpm lockfile verification cache is not found');
+    }
+  } catch (error) {
+    // The verification log only saves time, never correctness: a job that
+    // cannot restore it re-verifies the lockfile and moves on.
+    core.warning(
+      `Failed to restore the pnpm lockfile verification cache: ${(error as Error).message}`
+    );
+  }
 };
 
 const findLockFile = (packageManager: PackageManagerInfo) => {

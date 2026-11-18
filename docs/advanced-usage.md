@@ -310,6 +310,7 @@ steps:
 > **Note**: By default `--frozen-lockfile` option is passed starting from pnpm `6.10.x`. It will be automatically added if you run it on [CI](https://pnpm.io/cli/install#--frozen-lockfile). 
 > If the `pnpm-lock.yaml` file changes then pass `--frozen-lockfile` option.
 
+> **Note**: `pnpm` v11 and newer verify every lockfile entry against the registry before installing it — that each entry pins an integrity hash, that a pinned tarball URL matches the registry's own metadata and, where configured, the repository's supply-chain policies (`minimumReleaseAge`, `trustPolicy`, ...) — and memoize the verdict in `lockfile-verified.jsonl` beside its other caches. The action restores and saves that small file under its own cache key next to the store, so an unchanged lockfile skips the registry-backed verification round trip on the next runner. The store cache alone cannot carry it, because pnpm keeps the file with its caches, not with the packages. Resolving the file's location needs pnpm v12+ (`pnpm cache path`); with older pnpm the file simply stays out of the cache and the action behaves as before.
 
 **Using wildcard patterns to cache dependencies**
 ```yaml

@@ -61,6 +61,7 @@ const cache = await import('@actions/cache');
 const glob = await import('@actions/glob');
 const exec = await import('@actions/exec');
 const utils = await import('../src/cache-utils.js');
+const {State} = await import('../src/constants.js');
 const {restoreCache} = await import('../src/cache-restore.js');
 
 describe('cache-restore', () => {
@@ -100,6 +101,8 @@ describe('cache-restore', () => {
         return npmCachePath;
       case 'pnpm store path --silent':
         return pnpmCachePath;
+      case 'pnpm cache path':
+        return `${commonPath}/pnpm-cache`;
       case 'yarn cache dir':
         return yarn1CachePath;
       case 'yarn config get cacheFolder':
@@ -262,6 +265,89 @@ describe('cache-restore', () => {
         );
       }
     );
+  });
+
+  describe('Restore the pnpm lockfile verification log', () => {
+    const verificationLogPath = `${commonPath}/pnpm-cache/lockfile-verified.jsonl`;
+    const verificationKey = `node-cache-${platform}-${arch}-pnpm-verification-${pnpmFileHash}`;
+
+    it('restores the verification log under its own key', async () => {
+      setWorkspaceFor('pnpm');
+      getExecOutputSpy.mockImplementation(async (command: any) => ({
+        stdout: findCacheFolder(command),
+        stderr: '',
+        exitCode: 0
+      }));
+      restoreCacheSpy.mockClear();
+
+      await restoreCache('pnpm', '');
+
+      expect(restoreCacheSpy).toHaveBeenCalledWith(
+        [verificationLogPath],
+        verificationKey
+      );
+      expect(saveStateSpy).toHaveBeenCalledWith(
+        State.CacheVerificationLogPath,
+        verificationLogPath
+      );
+      expect(saveStateSpy).toHaveBeenCalledWith(
+        State.CacheVerificationLogKey,
+        verificationKey
+      );
+    });
+
+    it('restores the verification log even when the store is not found', async () => {
+      setWorkspaceFor('pnpm');
+      getExecOutputSpy.mockImplementation(async (command: any) => ({
+        stdout: findCacheFolder(command),
+        stderr: '',
+        exitCode: 0
+      }));
+      restoreCacheSpy.mockImplementation(() => undefined);
+      restoreCacheSpy.mockClear();
+
+      await restoreCache('pnpm', '');
+
+      expect(restoreCacheSpy).toHaveBeenCalledTimes(2);
+      expect(restoreCacheSpy).toHaveBeenCalledWith(
+        [verificationLogPath],
+        verificationKey
+      );
+      expect(infoSpy).toHaveBeenCalledWith('pnpm cache is not found');
+    });
+
+    it('skips the verification log when pnpm does not expose a cache path', async () => {
+      setWorkspaceFor('pnpm');
+      getExecOutputSpy.mockImplementation(async (command: any) => {
+        if (command.includes('pnpm cache path')) {
+          return {stdout: '', stderr: 'unknown command', exitCode: 1};
+        }
+        return {stdout: findCacheFolder(command), stderr: '', exitCode: 0};
+      });
+      restoreCacheSpy.mockClear();
+
+      await restoreCache('pnpm', '');
+
+      expect(restoreCacheSpy).toHaveBeenCalledTimes(1);
+      expect(restoreCacheSpy).not.toHaveBeenCalledWith(
+        [verificationLogPath],
+        verificationKey
+      );
+    });
+
+    it('does not restore a verification log for npm', async () => {
+      setWorkspaceFor('npm');
+      getExecOutputSpy.mockImplementation(async (command: any) => ({
+        stdout: findCacheFolder(command),
+        stderr: '',
+        exitCode: 0
+      }));
+      restoreCacheSpy.mockClear();
+
+      await restoreCache('npm', '');
+
+      expect(restoreCacheSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   afterEach(() => {

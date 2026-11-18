@@ -158,6 +158,42 @@ describe('cache-utils', () => {
     });
   });
 
+  describe('getVerificationLogPath', () => {
+    it('joins the pnpm cache directory with the log file name', async () => {
+      getExecOutputSpy.mockImplementationOnce(async () => ({
+        stdout: '/home/runner/.cache/pnpm\n',
+        stderr: '',
+        exitCode: 0
+      }));
+
+      await expect(
+        supportedPackageManagers.pnpm.getVerificationLogPath!()
+      ).resolves.toBe('/home/runner/.cache/pnpm/lockfile-verified.jsonl');
+    });
+
+    it('returns undefined when pnpm does not expose a cache path', async () => {
+      getExecOutputSpy.mockImplementationOnce(async () => ({
+        stdout: '',
+        stderr: 'unknown command',
+        exitCode: 1
+      }));
+
+      await expect(
+        supportedPackageManagers.pnpm.getVerificationLogPath!()
+      ).resolves.toBeUndefined();
+      expect(debugSpy).toHaveBeenCalled();
+    });
+
+    it('is not defined for npm and yarn', () => {
+      expect(
+        supportedPackageManagers.npm.getVerificationLogPath
+      ).toBeUndefined();
+      expect(
+        supportedPackageManagers.yarn.getVerificationLogPath
+      ).toBeUndefined();
+    });
+  });
+
   it('isCacheFeatureAvailable for GHES is false', () => {
     isFeatureAvailable.mockImplementation(() => false);
     process.env['GITHUB_SERVER_URL'] = 'https://www.test.com';

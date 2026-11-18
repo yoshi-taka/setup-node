@@ -10,7 +10,52 @@ export interface PackageManagerInfo {
   name: string;
   lockFilePatterns: Array<string>;
   getCacheFolderPath: (projectDir?: string) => Promise<string>;
+  /**
+   * Path of a package-manager-specific verification memo that belongs in the
+   * cache beside the store (pnpm's lockfile verification log), or undefined
+   * when the package manager does not keep one or does not expose where.
+   * Restoring it lets the workflow's install skip a verification round trip;
+   * the file is keyed by lockfile content inside itself, so a stale copy is
+   * ignored rather than trusted.
+   */
+  getVerificationLogPath?: () => Promise<string | undefined>;
 }
+
+/**
+ * pnpm v11 and newer verify every lockfile entry before installing it — that
+ * each entry pins an integrity hash, that a pinned tarball URL matches the
+ * registry's own metadata and, where configured, the repository's supply-chain
+ * policies (minimumReleaseAge, trustPolicy, ...) — and memoize the verdict in
+ * `<cacheDir>/lockfile-verified.jsonl`. A job that starts without that log
+ * re-runs the whole registry-backed check, which on a large repository can
+ * cost more than the install itself. The store cache does not carry the log,
+ * because pnpm keeps it with its other caches, not with the packages.
+ *
+ * pnpm 12 and newer print their cache directory through `pnpm cache path`;
+ * on older versions the command fails and the log simply stays out of the
+ * cache, leaving this action's behavior unchanged.
+ */
+const getPnpmVerificationLogPath = async (): Promise<string | undefined> => {
+  const {exitCode, stdout} = await exec.getExecOutput(
+    'pnpm cache path',
+    undefined,
+    {silent: true, ignoreReturnCode: true}
+  );
+  if (exitCode !== 0) {
+    core.debug(
+      `'pnpm cache path' failed with exit code ${exitCode}; not caching the pnpm lockfile verification log`
+    );
+    return undefined;
+  }
+  const cacheDir = stdout.trim();
+  if (!cacheDir) {
+    core.debug(
+      "'pnpm cache path' printed no path; not caching the pnpm lockfile verification log"
+    );
+    return undefined;
+  }
+  return path.join(cacheDir, 'lockfile-verified.jsonl');
+};
 
 interface SupportedPackageManagers {
   npm: PackageManagerInfo;
@@ -34,7 +79,8 @@ export const supportedPackageManagers: SupportedPackageManagers = {
       getCommandOutputNotEmpty(
         'pnpm store path --silent',
         'Could not get pnpm cache folder path'
-      )
+      ),
+    getVerificationLogPath: getPnpmVerificationLogPath
   },
   yarn: {
     name: 'yarn',

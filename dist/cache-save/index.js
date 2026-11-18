@@ -38135,6 +38135,18 @@ module.exports = /*#__PURE__*/JSON.parse('{"name":"@actions/cache","version":"6.
 /******/ /* webpack/runtime/asset-relocator-loader */
 /******/ if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = decodeURIComponent(new URL('.', import.meta.url).pathname).slice(import.meta.url.match(/^file:\/\/\/\w:/) ? 1 : 0, -1) + "/";
 /******/ 
+/******/ /* webpack/runtime/compat get default export */
+/******/ (() => {
+/******/ 	// getDefaultExport function for compatibility with non-harmony modules
+/******/ 	__nccwpck_require__.n = (module) => {
+/******/ 		var getter = module && module.__esModule ?
+/******/ 			() => (module['default']) :
+/******/ 			() => (module);
+/******/ 		__nccwpck_require__.d(getter, { a: getter });
+/******/ 		return getter;
+/******/ 	};
+/******/ })();
+/******/ 
 /******/ /* webpack/runtime/create fake namespace object */
 /******/ (() => {
 /******/ 	var getProto = Object.getPrototypeOf ? (obj) => (Object.getPrototypeOf(obj)) : (obj) => (obj.__proto__);
@@ -38520,6 +38532,7 @@ function escapeProperty(s) {
 const external_crypto_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("crypto");
 ;// CONCATENATED MODULE: external "fs"
 const external_fs_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("fs");
+var external_fs_default = /*#__PURE__*/__nccwpck_require__.n(external_fs_namespaceObject);
 ;// CONCATENATED MODULE: ./node_modules/@actions/core/lib/file-command.js
 // For internal use, subject to change.
 // We use any as a valid input type
@@ -38557,6 +38570,7 @@ function file_command_prepareKeyValueMessage(key, value) {
 //# sourceMappingURL=file-command.js.map
 ;// CONCATENATED MODULE: external "path"
 const external_path_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("path");
+var external_path_default = /*#__PURE__*/__nccwpck_require__.n(external_path_namespaceObject);
 // EXTERNAL MODULE: external "http"
 var external_http_ = __nccwpck_require__(8611);
 var external_http_namespaceObject = /*#__PURE__*/__nccwpck_require__.t(external_http_, 2);
@@ -90924,6 +90938,8 @@ var State;
     State["CachePrimaryKey"] = "CACHE_KEY";
     State["CacheMatchedKey"] = "CACHE_RESULT";
     State["CachePaths"] = "CACHE_PATHS";
+    State["CacheVerificationLogPath"] = "CACHE_VERIFICATION_LOG_PATH";
+    State["CacheVerificationLogKey"] = "CACHE_VERIFICATION_LOG_KEY";
 })(State || (State = {}));
 var Outputs;
 (function (Outputs) {
@@ -92224,6 +92240,33 @@ const util_unique = () => {
 
 
 
+/**
+ * pnpm v11 and newer verify every lockfile entry before installing it — that
+ * each entry pins an integrity hash, that a pinned tarball URL matches the
+ * registry's own metadata and, where configured, the repository's supply-chain
+ * policies (minimumReleaseAge, trustPolicy, ...) — and memoize the verdict in
+ * `<cacheDir>/lockfile-verified.jsonl`. A job that starts without that log
+ * re-runs the whole registry-backed check, which on a large repository can
+ * cost more than the install itself. The store cache does not carry the log,
+ * because pnpm keeps it with its other caches, not with the packages.
+ *
+ * pnpm 12 and newer print their cache directory through `pnpm cache path`;
+ * on older versions the command fails and the log simply stays out of the
+ * cache, leaving this action's behavior unchanged.
+ */
+const getPnpmVerificationLogPath = async () => {
+    const { exitCode, stdout } = await getExecOutput('pnpm cache path', undefined, { silent: true, ignoreReturnCode: true });
+    if (exitCode !== 0) {
+        core_debug(`'pnpm cache path' failed with exit code ${exitCode}; not caching the pnpm lockfile verification log`);
+        return undefined;
+    }
+    const cacheDir = stdout.trim();
+    if (!cacheDir) {
+        core_debug("'pnpm cache path' printed no path; not caching the pnpm lockfile verification log");
+        return undefined;
+    }
+    return external_path_default().join(cacheDir, 'lockfile-verified.jsonl');
+};
 const supportedPackageManagers = {
     npm: {
         name: 'npm',
@@ -92233,7 +92276,8 @@ const supportedPackageManagers = {
     pnpm: {
         name: 'pnpm',
         lockFilePatterns: ['pnpm-lock.yaml'],
-        getCacheFolderPath: () => getCommandOutputNotEmpty('pnpm store path --silent', 'Could not get pnpm cache folder path')
+        getCacheFolderPath: () => getCommandOutputNotEmpty('pnpm store path --silent', 'Could not get pnpm cache folder path'),
+        getVerificationLogPath: getPnpmVerificationLogPath
     },
     yarn: {
         name: 'yarn',
@@ -92433,6 +92477,7 @@ function isCacheFeatureAvailable() {
 
 
 
+
 // Catch and log any unhandled exceptions.  These exceptions can leak out of the uploadChunk method in
 // @actions/toolkit when a failed upload closes the file descriptor causing any in-process reads to
 // throw an uncaught exception.  Instead of failing this action, just warn.
@@ -92473,6 +92518,7 @@ const cachePackages = async (packageManager) => {
         const cacheDependencyPath = getInput('cache-dependency-path') || '';
         throw new Error(`Cache folder paths are not retrieved for ${packageManager} with cache-dependency-path = ${cacheDependencyPath}`);
     }
+    await saveVerificationLog(packageManagerInfo);
     if (primaryKey === state) {
         info(`Cache hit occurred on the primary key ${primaryKey}, not saving cache.`);
         return;
@@ -92486,6 +92532,43 @@ const cachePackages = async (packageManager) => {
         return;
     }
     info(`Cache saved with the key: ${primaryKey}`);
+};
+/**
+ * pnpm's lockfile verification log lets the next job skip a registry-backed
+ * verification round trip, so it is saved from every job — including one whose
+ * store already hit its primary key, which returns before the store save.
+ * The path and key were resolved by the main step and handed over through
+ * the action state, so the post step needs no pnpm invocation of its own.
+ */
+const saveVerificationLog = async (packageManagerInfo) => {
+    if (!packageManagerInfo.getVerificationLogPath) {
+        return;
+    }
+    const logPath = getState(State.CacheVerificationLogPath);
+    const logKey = getState(State.CacheVerificationLogKey);
+    if (!logPath || !logKey) {
+        // The main step resolved no verification log (older pnpm, or a restore
+        // step that did not run), so there is nothing to save.
+        core_debug('No pnpm lockfile verification log to cache');
+        return;
+    }
+    if (!external_fs_default().existsSync(logPath)) {
+        core_debug(`No pnpm lockfile verification log at ${logPath}; nothing to cache`);
+        return;
+    }
+    try {
+        const cacheId = await cache_saveCache([logPath], logKey);
+        if (cacheId === -1) {
+            core_debug(`pnpm lockfile verification cache was not saved for the key: ${logKey}`);
+            return;
+        }
+        info(`pnpm lockfile verification cache saved with the key: ${logKey}`);
+    }
+    catch (error) {
+        // A failed save costs the next job only the re-verification; never fail
+        // the post step over it.
+        warning(`Failed to save the pnpm lockfile verification cache: ${error.message}`);
+    }
 };
 run(true);
 

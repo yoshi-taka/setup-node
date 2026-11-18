@@ -256,15 +256,19 @@ describe('run', () => {
             ? yarnFileHash
             : key === State.CachePaths
               ? '["/foo/bar"]'
-              : 'not expected'
+              : key === State.CacheVerificationLogPath ||
+                  key === State.CacheVerificationLogKey
+                ? ''
+                : 'not expected'
       );
 
       await run();
 
       expect(getInputSpy).not.toHaveBeenCalled();
-      expect(getStateSpy).toHaveBeenCalledTimes(4);
+      expect(getStateSpy).toHaveBeenCalledTimes(6);
       expect(getExecOutputSpy).toHaveBeenCalledTimes(0);
-      expect(debugSpy).toHaveBeenCalledTimes(0);
+      expect(debugSpy).toHaveBeenCalledTimes(1);
+      expect(saveCacheSpy).not.toHaveBeenCalled();
       expect(setFailedSpy).not.toHaveBeenCalled();
     });
   });
@@ -371,19 +375,23 @@ describe('run', () => {
               ? npmFileHash
               : key === State.CachePaths
                 ? '["/foo/bar"]'
-                : 'not expected'
+                : key === State.CacheVerificationLogPath ||
+                    key === State.CacheVerificationLogKey
+                  ? ''
+                  : 'not expected'
       );
 
       await run();
 
       expect(getInputSpy).not.toHaveBeenCalled();
-      expect(getStateSpy).toHaveBeenCalledTimes(4);
+      expect(getStateSpy).toHaveBeenCalledTimes(6);
       expect(getExecOutputSpy).toHaveBeenCalledTimes(0);
-      expect(debugSpy).toHaveBeenCalledTimes(0);
+      expect(debugSpy).toHaveBeenCalledTimes(1);
       expect(infoSpy).not.toHaveBeenCalledWith(
         `Cache hit occurred on the primary key ${pnpmFileHash}, not saving cache.`
       );
-      expect(saveCacheSpy).toHaveBeenCalled();
+      expect(saveCacheSpy).toHaveBeenCalledTimes(1);
+      expect(saveCacheSpy).toHaveBeenCalledWith(['/foo/bar'], npmFileHash);
       expect(infoSpy).toHaveBeenLastCalledWith(
         `Cache saved with the key: ${npmFileHash}`
       );
@@ -453,6 +461,120 @@ describe('run', () => {
       );
       expect(saveCacheSpy).toHaveBeenCalled();
       expect(setFailedSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('Save the pnpm lockfile verification log', () => {
+    const verificationLogPath = '/cache/dir/lockfile-verified.jsonl';
+    const verificationKey = 'node-cache-Linux-arm64-pnpm-verification-hash';
+
+    const pnpmState = (extra: Record<string, string>) => (key: any) =>
+      key === State.CachePackageManager
+        ? 'pnpm'
+        : key === State.CachePaths
+          ? '["/foo/bar"]'
+          : key in extra
+            ? extra[key]
+            : 'not expected';
+
+    it('saves the verification log even on a primary-key store hit', async () => {
+      inputs['cache'] = 'pnpm';
+      getStateSpy.mockImplementation(
+        pnpmState({
+          [State.CachePrimaryKey]: 'primary-key',
+          [State.CacheMatchedKey]: 'primary-key',
+          [State.CacheVerificationLogPath]: verificationLogPath,
+          [State.CacheVerificationLogKey]: verificationKey
+        })
+      );
+
+      await run();
+
+      // The store was not saved again, but the small verification log was.
+      expect(saveCacheSpy).toHaveBeenCalledTimes(1);
+      expect(saveCacheSpy).toHaveBeenCalledWith(
+        [verificationLogPath],
+        verificationKey
+      );
+      expect(infoSpy).toHaveBeenCalledWith(
+        `pnpm lockfile verification cache saved with the key: ${verificationKey}`
+      );
+      expect(infoSpy).toHaveBeenCalledWith(
+        'Cache hit occurred on the primary key primary-key, not saving cache.'
+      );
+      expect(setFailedSpy).not.toHaveBeenCalled();
+    });
+
+    it('skips the verification log save when the log file is missing', async () => {
+      inputs['cache'] = 'pnpm';
+      existsSpy.mockImplementation(() => false);
+      getStateSpy.mockImplementation(
+        pnpmState({
+          [State.CachePrimaryKey]: 'primary-key',
+          [State.CacheMatchedKey]: '',
+          [State.CacheVerificationLogPath]: verificationLogPath,
+          [State.CacheVerificationLogKey]: verificationKey
+        })
+      );
+
+      await run();
+
+      // Only the store was saved.
+      expect(saveCacheSpy).toHaveBeenCalledTimes(1);
+      expect(saveCacheSpy).not.toHaveBeenCalledWith(
+        [verificationLogPath],
+        verificationKey
+      );
+      expect(debugSpy).toHaveBeenCalledWith(
+        `No pnpm lockfile verification log at ${verificationLogPath}; nothing to cache`
+      );
+      expect(setFailedSpy).not.toHaveBeenCalled();
+    });
+
+    it('reports a failed verification log save as a warning, not a failure', async () => {
+      inputs['cache'] = 'pnpm';
+      getStateSpy.mockImplementation(
+        pnpmState({
+          [State.CachePrimaryKey]: 'primary-key',
+          [State.CacheMatchedKey]: 'primary-key',
+          [State.CacheVerificationLogPath]: verificationLogPath,
+          [State.CacheVerificationLogKey]: verificationKey
+        })
+      );
+      saveCacheSpy.mockImplementation((paths: string[]) => {
+        if (paths[0] === verificationLogPath) {
+          throw new Error('cache service refused');
+        }
+        return 1;
+      });
+
+      await run();
+
+      expect(warningSpy).toHaveBeenCalledWith(
+        'Failed to save the pnpm lockfile verification cache: cache service refused'
+      );
+      // The post step still completed the store-hit path without failing.
+      expect(setFailedSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not read verification log state for npm', async () => {
+      inputs['cache'] = 'npm';
+      getStateSpy.mockImplementation((key: any) =>
+        key === State.CachePackageManager
+          ? 'npm'
+          : key === State.CachePrimaryKey || key === State.CacheMatchedKey
+            ? 'primary-key'
+            : key === State.CachePaths
+              ? '["/foo/bar"]'
+              : 'not expected'
+      );
+
+      await run();
+
+      // npm never touches the verification log state: the four store calls
+      // are all this action reads.
+      expect(getStateSpy).toHaveBeenCalledTimes(4);
+      expect(saveCacheSpy).not.toHaveBeenCalled();
     });
   });
 });
